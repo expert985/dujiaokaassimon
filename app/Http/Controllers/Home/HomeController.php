@@ -132,20 +132,44 @@ class HomeController extends BaseController
     public function doInstall(Request $request)
     {
         try {
+            // 安全增强：输入验证
+            $validator = \Validator::make($request->all(), [
+                'db_host' => 'required|string|max:255',
+                'db_port' => 'required|integer|min:1|max:65535',
+                'db_database' => 'required|string|max:64|regex:/^[a-zA-Z0-9_]+$/',
+                'db_username' => 'required|string|max:32',
+                'db_password' => 'nullable|string|max:255',
+                'redis_host' => 'required|string|max:255',
+                'redis_port' => 'required|integer|min:1|max:65535',
+                'redis_password' => 'nullable|string|max:255',
+                'admin_path' => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
+                'title' => 'required|string|max:100',
+                'app_url' => 'required|url|max:255',
+            ], [
+                'db_database.regex' => '数据库名称只能包含字母、数字和下划线',
+                'admin_path.regex' => '管理路径只能包含字母、数字、下划线和连字符',
+            ]);
+
+            if ($validator->fails()) {
+                return '输入验证失败：' . $validator->errors()->first();
+            }
+
+            $validated = $validator->validated();
+
             $dbConfig = config('database');
             $mysqlDB = [
-                'host' => $request->input('db_host'),
-                'port' => $request->input('db_port'),
-                'database' => $request->input('db_database'),
-                'username' => $request->input('db_username'),
-                'password' => $request->input('db_password'),
+                'host' => $validated['db_host'],
+                'port' => $validated['db_port'],
+                'database' => $validated['db_database'],
+                'username' => $validated['db_username'],
+                'password' => $validated['db_password'] ?? '',
             ];
             $dbConfig['connections']['mysql'] = array_merge($dbConfig['connections']['mysql'], $mysqlDB);
             // Redis
             $redisDB = [
-                'host' => $request->input('redis_host'),
-                'password' => $request->input('redis_password', 'null'),
-                'port' => $request->input('redis_port'),
+                'host' => $validated['redis_host'],
+                'password' => $validated['redis_password'] ?? 'null',
+                'port' => $validated['redis_port'],
             ];
             $dbConfig['redis']['default'] = array_merge($dbConfig['redis']['default'], $redisDB);
             config(['database' => $dbConfig]);
@@ -160,27 +184,91 @@ class HomeController extends BaseController
             $envPath =  base_path() . DIRECTORY_SEPARATOR . '.env';
             $installLock = base_path() . DIRECTORY_SEPARATOR . 'install.lock';
             $installSql = database_path() . DIRECTORY_SEPARATOR . 'sql' . DIRECTORY_SEPARATOR . 'install.sql';
-            $envTemp = file_get_contents($envExamplePath);
-            $postData = $request->all();
-            // 临时写入key
-            $postData['app_key'] = 'base64:' . base64_encode(
-                    Encrypter::generateKey(config('app.cipher'))
-                );
-            foreach ($postData as $key => $item) {
-                $envTemp = str_replace('{' . $key . '}', $item, $envTemp);
+
+            // 安全增强：验证模板文件存在
+            if (!file_exists($envExamplePath)) {
+                return '错误：.env.example 文件不存在';
             }
+            if (!file_exists($installSql)) {
+                return '错误：install.sql 文件不存在';
+            }
+
+            $envTemp = file_get_contents($envExamplePath);
+
+            // 安全增强：生成应用密钥
+            $appKey = 'base64:' . base64_encode(
+                Encrypter::generateKey(config('app.cipher'))
+            );
+
+            // 安全增强：使用白名单方式替换环境变量，防止注入
+            $envVars = [
+                'title' => $validated['title'],
+                'app_key' => $appKey,
+                'app_url' => $validated['app_url'],
+                'db_host' => $validated['db_host'],
+                'db_port' => $validated['db_port'],
+                'db_database' => $validated['db_database'],
+                'db_username' => $validated['db_username'],
+                'db_password' => $validated['db_password'] ?? '',
+                'redis_host' => $validated['redis_host'],
+                'redis_password' => $validated['redis_password'] ?? 'null',
+                'redis_port' => $validated['redis_port'],
+                'admin_path' => $validated['admin_path'],
+            ];
+
+            // 安全增强：转义特殊字符并使用模板替换
+            foreach ($envVars as $key => $value) {
+                // 转义反斜杠和双引号
+                $escapedValue = str_replace(['\\', '"'], ['\\\\', '\\"'], $value);
+                $envTemp = str_replace('{' . $key . '}', $escapedValue, $envTemp);
+            }
+
             // 写入配置
             file_put_contents($envPath, $envTemp);
-            // 导入sql
-            DB::unprepared(file_get_contents($installSql));
+
+            // 安全增强：使用事务执行SQL安装
+            DB::beginTransaction();
+            try {
+                // 读取并执行SQL文件
+                $sqlContent = file_get_contents($installSql);
+                // 分割SQL语句（简单处理，按分号和换行分割）
+                $statements = array_filter(
+                    array_map('trim', explode(';', $sqlContent)),
+                    function($stmt) {
+                        return !empty($stmt) && !preg_match('/^--/', $stmt);
+                    }
+                );
+
+                foreach ($statements as $statement) {
+                    if (!empty(trim($statement))) {
+                        DB::statement($statement);
+                    }
+                }
+
+                DB::commit();
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw new \Exception('数据库安装失败：' . $e->getMessage());
+            }
+
             // 写入安装锁
-            file_put_contents($installLock, 'install ok');
+            file_put_contents($installLock, 'install ok - ' . date('Y-m-d H:i:s'));
+
+            // 安全日志
+            \Log::info('系统安装成功', [
+                'ip' => $request->ip(),
+                'time' => date('Y-m-d H:i:s'),
+            ]);
+
             return 'success';
         } catch (\RedisException $exception) {
+            \Log::error('Redis配置错误', ['error' => $exception->getMessage()]);
             return 'Redis配置错误 :' . $exception->getMessage();
         } catch (QueryException $exception) {
+            \Log::error('数据库配置错误', ['error' => $exception->getMessage()]);
             return '数据库配置错误 :' . $exception->getMessage();
         } catch (\Exception $exception) {
+            \Log::error('安装过程错误', ['error' => $exception->getMessage()]);
             return $exception->getMessage();
         }
     }

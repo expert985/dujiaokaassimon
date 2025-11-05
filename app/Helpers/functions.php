@@ -157,9 +157,20 @@ if (! function_exists('site_url')) {
      */
     function site_url()
     {
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || $_SERVER['SERVER_PORT'] == 443) ? "https://" : "http://";
-        $domainName = $_SERVER['HTTP_HOST'] . '/';
-        return $protocol . $domainName;
+        // 安全增强：使用Laravel的config和request()代替超全局变量
+        // 优先使用配置的APP_URL
+        $configUrl = config('app.url');
+        if (!empty($configUrl)) {
+            return rtrim($configUrl, '/') . '/';
+        }
+
+        // 回退到请求对象
+        if (function_exists('request') && request()) {
+            return request()->getSchemeAndHttpHost() . '/';
+        }
+
+        // 最后回退（仅用于CLI模式等特殊情况）
+        return 'http://localhost/';
     }
 }
 

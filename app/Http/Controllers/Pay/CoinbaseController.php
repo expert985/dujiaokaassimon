@@ -81,7 +81,14 @@ class CoinbaseController extends PayController
     public function notifyUrl(Request $request)
     {
         $payload = file_get_contents( 'php://input' );
-        $sig    = $_SERVER['HTTP_X_CC_WEBHOOK_SIGNATURE'];
+        // 安全增强：使用Request对象获取头部信息
+        $sig = $request->header('X-CC-Webhook-Signature');
+
+        // 验证签名是否存在
+        if (empty($sig)) {
+            \Log::warning('Coinbase notify missing signature');
+            return 'fail|Missing signature';
+        }
 		$data       = json_decode( $payload, true );
 		$event_data = $data['event']['data'];
 		$order = $this->orderService->detailOrderSN($event_data['metadata']['customer_id']);//

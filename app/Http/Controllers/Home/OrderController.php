@@ -99,13 +99,20 @@ class OrderController extends BaseController
     {
         // 设置订单cookie
         $cookies = Cookie::get('dujiaoka_orders');
-        if (empty($cookies)) {
-            Cookie::queue('dujiaoka_orders', json_encode([$orderSN]));
-        } else {
-            $cookies = json_decode($cookies, true);
-            array_push($cookies, $orderSN);
-            Cookie::queue('dujiaoka_orders', json_encode($cookies));
-        }
+        $cookieValue = empty($cookies) ? json_encode([$orderSN]) : json_encode(array_merge(json_decode($cookies, true) ?: [], [$orderSN]));
+
+        // 安全增强：设置Cookie安全属性
+        Cookie::queue(
+            'dujiaoka_orders',     // name
+            $cookieValue,          // value
+            60 * 24 * 7,           // minutes (7天)
+            '/',                   // path
+            null,                  // domain (null使用默认)
+            config('session.secure', false), // secure (HTTPS only)
+            true,                  // httpOnly (防止JavaScript访问)
+            false,                 // raw
+            config('session.same_site', 'lax') // sameSite (防CSRF)
+        );
     }
 
     /**
@@ -205,6 +212,25 @@ class OrderController extends BaseController
      */
     public function searchOrderByEmail(Request $request)
     {
+        // 安全增强：频率限制 - 防止暴力破解
+        $rateLimitKey = 'order-search:' . $request->ip();
+        $maxAttempts = 10; // 每5分钟最多10次
+        $decayMinutes = 5;
+
+        if (\Illuminate\Support\Facades\Cache::has($rateLimitKey)) {
+            $attempts = \Illuminate\Support\Facades\Cache::get($rateLimitKey);
+            if ($attempts >= $maxAttempts) {
+                \Log::warning('订单查询频率限制触发', [
+                    'ip' => $request->ip(),
+                    'email' => $request->input('email'),
+                ]);
+                return $this->err('查询过于频繁，请' . $decayMinutes . '分钟后再试');
+            }
+            \Illuminate\Support\Facades\Cache::put($rateLimitKey, $attempts + 1, now()->addMinutes($decayMinutes));
+        } else {
+            \Illuminate\Support\Facades\Cache::put($rateLimitKey, 1, now()->addMinutes($decayMinutes));
+        }
+
         if (
             !$request->has('email') ||
             (

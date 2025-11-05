@@ -194,6 +194,7 @@ return [
     |
     */
 
-    'same_site' => null,
+    // 安全增强：设置为lax防止CSRF攻击
+    'same_site' => env('SESSION_SAME_SITE', 'lax'),
 
 ];
